@@ -7,7 +7,7 @@ from data loading to model evaluation. Students can use this as a
 template for their own experiments.
 
 Usage:
-    python scripts/train_baseline.py --model linear_regression
+    python scripts/train_baseline.py --model linear
     python scripts/train_baseline.py --model random_forest --config config/custom_config.yaml
 """
 
@@ -16,9 +16,7 @@ import yaml
 import logging
 from pathlib import Path
 import pandas as pd
-import numpy as np
 from datetime import datetime
-import joblib
 
 # Add src to path so we can import our modules
 import sys
@@ -89,8 +87,8 @@ def load_and_prepare_data(config: dict, sample_size = None) -> tuple[pd.DataFram
     """
     logger.info("Loading data...")
     
-    # Initialize data loader
-    data_loader = FreshRetailDataLoader()
+    # Initialize data loader with provided config
+    data_loader = FreshRetailDataLoader(config=config)
     train_data, eval_data = data_loader.load_data()
     
     # Sample data if requested (useful for quick experiments)

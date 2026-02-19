@@ -1,11 +1,10 @@
 # src/data/data_loader.py
 import pandas as pd
 import numpy as np
-from datasets import load_dataset
-from typing import Dict, Tuple, Optional, List
+from typing import Tuple, Optional
 import logging
-from pathlib import Path
 import yaml
+from sqlalchemy import create_engine
 
 # Set up logging to help students debug issues
 logging.basicConfig(filename="app.log",filemode="a",level=logging.INFO,
@@ -23,20 +22,27 @@ class FreshRetailDataLoader:
     - Clear documentation
     """
     
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config: Optional[dict] = None, config_path: str = "config/config.yaml"):
+        """Initialize the data loader with configuration.
+
+        Accepts either a config dict or a path to a yaml file. Initializes
+        an SQLite engine (file path can be overridden in config under
+        `data.db_path`).
         """
-        Initialize the data loader with configuration.
-        
-        Teaching point: Always use configuration files rather than hardcoded values.
-        This makes your code more maintainable and allows easy experimentation.
-        """
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-        
-        self.data_config = self.config['data']
+        if config is not None:
+            self.config = config
+        else:
+            with open(config_path, 'r') as f:
+                self.config = yaml.safe_load(f)
+
+        self.data_config = self.config.get('data', {})
         self.dataset = None
         self.train_data = None
         self.eval_data = None
+
+        db_path = self.data_config.get('db_path', 'frn50k_data.db')
+        self.engine = create_engine(f"sqlite:///{db_path}", echo=False)
+        logger.info(f"SQLite engine initialized at: {self.engine.url}")
         
     def load_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -49,14 +55,20 @@ class FreshRetailDataLoader:
         and informative logging for production systems.
         """
         try:
-            logger.info("Loading FreshRetailNet-50K dataset from HuggingFace...")
-            
+            logger.info("Loading FreshRetailNet-50K dataset from files...")
+
             # Convert to pandas DataFrames for easier manipulation
-            self.train_data = df = pd.read_parquet(self.config['data']['train_path']).sample(frac=self.config['data']['fracture'], random_state=42)  # Use 10% for train to save memory   
-            self.eval_data = pd.read_csv(self.config['data']['eval_path']).sample(frac=self.config['data']['fracture'], random_state=42)  # Use 10% for eval to save memory
+            train_path = self.data_config.get('train_path')
+            eval_path = self.data_config.get('eval_path')
+            frac = float(self.data_config.get('fracture', 1.0))
+
+            self.train_data = pd.read_parquet(train_path).sample(frac=frac, random_state=42)
+            self.eval_data = pd.read_csv(eval_path).sample(frac=frac, random_state=42)
             
             # Convert datetime column to proper datetime type
-            datetime_col = self.data_config['datetime_column']
+            datetime_col = self.data_config.get('datetime_column')
+            if datetime_col is None:
+                raise KeyError('datetime_column not found in data configuration')
             self.train_data[datetime_col] = pd.to_datetime(self.train_data[datetime_col])
             self.eval_data[datetime_col] = pd.to_datetime(self.eval_data[datetime_col])
             
@@ -65,10 +77,16 @@ class FreshRetailDataLoader:
             logger.info(f"  Evaluation samples: {len(self.eval_data):,}")
             logger.info(f"  Date range: {self.train_data[datetime_col].min()} to {self.train_data[datetime_col].max()}")
             
+            # Load data into SQLite database for SQL queries
+            logger.info("Loading data into SQLite database...")
+            self.train_data.to_sql('train_data', con=self.engine, if_exists='replace', index=False)
+            self.eval_data.to_sql('eval_data', con=self.engine, if_exists='replace', index=False)
+            logger.info("Data loaded into SQLite. Use SQL queries on: train_data, eval_data tables")
+            
             return self.train_data, self.eval_data
             
         except Exception as e:
-            logger.error(f"Failed to load dataset: {e}")
+            logger.error(f"Failed to load dataset: {e}", exc_info=True)
             raise
     
     def get_data_summary(self) -> dict:
@@ -121,19 +139,34 @@ class FreshRetailDataLoader:
 
         The hours_stock_status column may contain arrays/lists of hourly status values.
         """
+        if self.train_data is None or self.train_data.empty:
+            return {
+                'total_observations': 0,
+                'stockout_hours': 0,
+                'stockout_rate_percent': 0.0,
+                'stores_with_stockouts': 0
+            }
+
         total_observations = len(self.train_data)
-        stock_status = self.train_data['hours_stock_status']
+        stock_status = self.train_data.get('hours_stock_status')
+        if stock_status is None or stock_status.empty:
+            return {
+                'total_observations': total_observations,
+                'stockout_hours': 0,
+                'stockout_rate_percent': 0.0,
+                'stores_with_stockouts': 0
+            }
 
         # Check if the column contains array-like values
-        first_value = stock_status.iloc[0]
+        first_value = stock_status.dropna().iloc[0] if not stock_status.dropna().empty else None
         if isinstance(first_value, (list, np.ndarray)):
             # Handle array-like values: count rows where any hour has stockout (0)
-            stockout_mask = stock_status.apply(lambda x: 0 in x if hasattr(x, '__iter__') else x == 0)
-            stockout_hours = stock_status.apply(lambda x: sum(1 for v in x if v == 0) if hasattr(x, '__iter__') else (1 if x == 0 else 0)).sum()
+            stockout_mask = stock_status.apply(lambda x: (0 in x) if isinstance(x, (list, np.ndarray)) else (x == 0))
+            stockout_hours = stock_status.apply(lambda x: sum(1 for v in x if v == 0) if isinstance(x, (list, np.ndarray)) else (1 if x == 0 else 0)).sum()
         else:
             # Handle scalar values
             stockout_mask = stock_status == 0
-            stockout_hours = stockout_mask.sum()
+            stockout_hours = int(stockout_mask.sum())
 
         return {
             'total_observations': total_observations,
@@ -146,10 +179,18 @@ class FreshRetailDataLoader:
         """
         Count duplicate rows, excluding columns with unhashable types (arrays/lists).
         """
-        # Get columns with hashable types only
+        if self.train_data is None or self.train_data.empty:
+            return 0
+
+        # Get columns with hashable/simple types only by inspecting first non-null value
         hashable_cols = []
         for col in self.train_data.columns:
-            first_val = self.train_data[col].iloc[0]
+            non_null = self.train_data[col].dropna()
+            if non_null.empty:
+                # treat empty/NaN column as hashable for duplication purposes
+                hashable_cols.append(col)
+                continue
+            first_val = non_null.iloc[0]
             if not isinstance(first_val, (list, np.ndarray)):
                 hashable_cols.append(col)
 

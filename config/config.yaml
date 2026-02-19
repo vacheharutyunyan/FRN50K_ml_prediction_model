@@ -1,10 +1,11 @@
 data:
-  train_path: "/Users/yenokhakobyan/Projects/FRN_second_attempt/dataset/raw/train.parquet"
-  eval_path: "/Users/yenokhakobyan/Projects/FRN_second_attempt/dataset/raw/eval.csv"
+  train_path: "C:/Users/Lenovo/Desktop/GitHub/FRN50K_ml_prediction_model/dataset/raw/train.parquet"
+  eval_path: "C:/Users/Lenovo/Desktop/GitHub/FRN50K_ml_prediction_model/dataset/raw/eval.csv"
   fracture: 0.1  
   target_column: "sale_amount"
   datetime_column: "dt"
   
+
 preprocessing:
   # Feature engineering configuration
   lag_periods: [1, 2, 3, 7, 14, 21]  # Hours to lag
